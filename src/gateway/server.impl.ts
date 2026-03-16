@@ -271,6 +271,24 @@ export type GatewayServerOptions = {
   ) => Promise<void>;
 };
 
+/**
+ * 启动网关服务器。
+ *
+ * 主要流程：
+ * 1. 读取并校验配置文件，必要时自动迁移旧版配置
+ * 2. 自动启用符合条件的插件
+ * 3. 解析运行时密钥（启动时若缺失则快速失败）
+ * 4. 确保网关鉴权就绪（缺少 token 时自动生成）
+ * 5. 初始化子代理注册表、插件注册表、频道管理器
+ * 6. 创建 HTTP/WebSocket 服务并绑定端口
+ * 7. 启动辅助服务：mDNS/Bonjour 发现、Tailscale 暴露、
+ *    定时任务（cron）、频道健康监控、浏览器控制、Canvas 宿主
+ * 8. 注册配置热重载监听器（支持热更新与自动重启）
+ * 9. 返回 {@link GatewayServer}，调用 `close()` 可优雅关停所有资源
+ *
+ * @param port - 监听端口，默认 18789
+ * @param opts - 可选启动参数（绑定地址、鉴权模式、Tailscale 等）
+ */
 export async function startGatewayServer(
   port = 18789,
   opts: GatewayServerOptions = {},
@@ -289,6 +307,7 @@ export async function startGatewayServer(
     description: "raw stream log path override",
   });
 
+  // ── 步骤 1: 读取并校验配置文件，必要时自动迁移旧版配置 ──
   let configSnapshot = await readConfigFileSnapshot();
   if (configSnapshot.legacyIssues.length > 0) {
     if (isNixMode) {
@@ -324,6 +343,7 @@ export async function startGatewayServer(
     );
   }
 
+  // ── 步骤 2: 自动启用符合条件的插件 ──
   const autoEnable = applyPluginAutoEnable({ config: configSnapshot.config, env: process.env });
   if (autoEnable.changes.length > 0) {
     try {
@@ -338,6 +358,7 @@ export async function startGatewayServer(
     }
   }
 
+  // ── 步骤 3: 解析运行时密钥（启动时若缺失则快速失败） ──
   let secretsDegraded = false;
   const emitSecretsStateEvent = (
     code: "SECRETS_RELOADER_DEGRADED" | "SECRETS_RELOADER_RECOVERED",
@@ -428,6 +449,7 @@ export async function startGatewayServer(
     });
   }
 
+  // ── 步骤 4: 确保网关鉴权就绪（缺少 token 时自动生成） ──
   cfgAtStart = loadConfig();
   const authBootstrap = await ensureGatewayStartupAuth({
     cfg: cfgAtStart,
@@ -470,6 +492,7 @@ export async function startGatewayServer(
     log,
   });
 
+  // ── 步骤 5: 初始化子代理注册表、插件注册表、频道管理器 ──
   initSubagentRegistry();
   const defaultAgentId = resolveDefaultAgentId(cfgAtStart);
   const defaultWorkspaceDir = resolveAgentWorkspaceDir(cfgAtStart, defaultAgentId);
@@ -571,6 +594,7 @@ export async function startGatewayServer(
   const wizardRunner = opts.wizardRunner ?? runSetupWizard;
   const { wizardSessions, findRunningWizard, purgeWizardSession } = createWizardSessionTracker();
 
+  // ── 步骤 6: 创建 HTTP/WebSocket 服务并绑定端口 ──
   const deps = createDefaultDeps();
   let canvasHostServer: CanvasHostServer | null = null;
   const gatewayTls = await loadGatewayTlsRuntime(cfgAtStart.gateway?.tls, log.child("tls"));
@@ -666,6 +690,7 @@ export async function startGatewayServer(
   const { getRuntimeSnapshot, startChannels, startChannel, stopChannel, markChannelLoggedOut } =
     channelManager;
 
+  // ── 步骤 7: 启动辅助服务（发现、定时任务、频道健康监控、浏览器控制、Canvas 宿主） ──
   if (!minimalTestGateway) {
     const machineDisplayName = await getMachineDisplayName();
     const discovery = await startGatewayDiscovery({
@@ -885,6 +910,7 @@ export async function startGatewayServer(
   // scope is set via AsyncLocalStorage.
   setFallbackGatewayContext(gatewayRequestContext);
 
+  // ── 步骤 7 (续): 绑定 WebSocket 处理器并启动 Tailscale 暴露 ──
   attachGatewayWsHandlers({
     wss,
     clients,
@@ -963,6 +989,7 @@ export async function startGatewayServer(
     }
   }
 
+  // ── 步骤 8: 注册配置热重载监听器（支持热更新与自动重启） ──
   const configReloader = minimalTestGateway
     ? { stop: async () => {} }
     : (() => {
@@ -1044,6 +1071,7 @@ export async function startGatewayServer(
         });
       })();
 
+  // ── 步骤 9: 构建关停处理器，返回 GatewayServer（调用 close() 可优雅关停所有资源） ──
   const close = createGatewayCloseHandler({
     bonjourStop,
     tailscaleCleanup,
